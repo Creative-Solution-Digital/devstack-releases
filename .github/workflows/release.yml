@@ -1,0 +1,94 @@
+# Build DevStack from a tag of its (private) source and publish the Windows
+# installer and the macOS .dmg here, with SHA-256 checksums.
+#
+#   gh workflow run release.yml -R Creative-Solution-Digital/devstack-releases -f tag=v0.2.0
+#
+# The source's scripts/release.sh tags and runs this. The release stays a
+# draft until every file is uploaded, so the app never offers half of one.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Source tag to build, e.g. v0.2.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag }}
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Creative-Solution-Digital/devstack
+          ref: ${{ inputs.tag }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+      # The tag must match [workspace.package] version, which the app, the
+      # command and the installer all report.
+      - name: Tag matches Cargo.toml
+        run: |
+          want=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          [ "v$want" = "$TAG" ] || { echo "Tag $TAG, Cargo.toml says $want"; exit 1; }
+      - name: Draft release
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "DevStack $TAG" --notes-file - <<'EOF'
+          **Windows:** download `DevStack_*_x64-setup.exe` and run it. It is not signed yet, so Windows SmartScreen asks first: More info, then Run anyway. Running it over an existing DevStack upgrades it; your projects and databases stay. DevStack also offers new versions itself.
+
+          **macOS (Apple Silicon):** open the `.dmg` and drag DevStack to Applications. It is not notarized yet: the first time, open it from System Settings → Privacy & Security → Open Anyway.
+
+          `SHA256SUMS-*.txt` lists each file's checksum.
+          EOF
+
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Creative-Solution-Digital/devstack
+          ref: ${{ inputs.tag }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the installer
+        run: powershell -File scripts\windows\build.ps1
+      - name: Upload
+        shell: bash
+        run: |
+          cd target/release/bundle/nsis
+          sha256sum *-setup.exe > SHA256SUMS-windows.txt
+          gh release upload "$TAG" *-setup.exe SHA256SUMS-windows.txt --clobber
+
+  macos:
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Creative-Solution-Digital/devstack
+          ref: ${{ inputs.tag }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the app and .dmg
+        run: scripts/macos/build.sh
+      - name: Upload
+        run: |
+          cd target/release/bundle/dmg
+          shasum -a 256 *.dmg > SHA256SUMS-macos.txt
+          gh release upload "$TAG" *.dmg SHA256SUMS-macos.txt --clobber
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish
+        run: gh release edit "$TAG" --draft=false --latest

@@ -3,8 +3,10 @@
 #
 #   gh workflow run release.yml -R Creative-Solution-Digital/devstack-releases -f tag=v0.2.0
 #
-# The source's scripts/release.sh tags and runs this. The release stays a
-# draft until every file is uploaded, so the app never offers half of one.
+# The source's scripts/release.sh tags and runs this, passing what changed
+# since the previous version as `notes`, shown first in the release. The
+# release stays a draft until every file is uploaded, so the app never
+# offers half of one.
 name: Release
 
 on:
@@ -13,12 +15,17 @@ on:
       tag:
         description: Source tag to build, e.g. v0.2.0
         required: true
+      notes:
+        description: What changed in this version (Markdown)
+        required: false
+        default: ''
 
 permissions:
   contents: write
 
 env:
   TAG: ${{ inputs.tag }}
+  NOTES: ${{ inputs.notes }}
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
 
@@ -39,13 +46,22 @@ jobs:
           [ "v$want" = "$TAG" ] || { echo "Tag $TAG, Cargo.toml says $want"; exit 1; }
       - name: Draft release
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --target main --draft --title "DevStack $TAG" --notes-file - <<'EOF'
+          {
+            if [ -n "$NOTES" ]; then printf "## What's new\n\n%s\n\n## Install\n\n" "$NOTES"; fi
+            cat <<'EOF'
           **Windows:** download `DevStack_*_x64-setup.exe` and run it. It is not signed yet, so Windows SmartScreen asks first: More info, then Run anyway. Running it over an existing DevStack upgrades it; your projects and databases stay. DevStack also offers new versions itself.
 
           **macOS (Apple Silicon):** open the `.dmg` and drag DevStack to Applications. It is not notarized yet: the first time, open it from System Settings → Privacy & Security → Open Anyway.
 
           `SHA256SUMS-*.txt` lists each file's checksum.
           EOF
+          } > notes.md
+          # Run again for the same tag: the notes are brought up to date.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --target main --draft --title "DevStack $TAG" --notes-file notes.md
+          fi
 
   windows:
     needs: prepare
